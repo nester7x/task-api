@@ -12,6 +12,8 @@ app.use(express.json());
 
 connectDb();
 
+app.get('/', (req, res) => res.json({ status: 'ok' }));
+
 app.use('/api/products', productRoute);
 app.use('/api/users', userRoute);
 
