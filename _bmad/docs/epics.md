@@ -601,6 +601,16 @@ So that I can investigate before my home gets too cold.
 **When** the dashboard is open
 **Then** the DeviceCard badge changes to red "Offline" without a page refresh (FR31 in-app alert)
 
+**Given** `SENSOR_ADAPTER=simulator` is active
+**When** a reading is ingested via `POST /internal/readings`
+**Then** `DeviceService.recordHeartbeat(deviceId)` is called inside `ReadingService.ingest()` — in simulator mode each reading serves as an implicit heartbeat; there is no separate heartbeat topic
+
+**Given** `SENSOR_ADAPTER=mqtt` is active
+**When** the Arduino publishes to `devices/<id>/heartbeat`
+**Then** `MqttAdapter` calls `DeviceService.recordHeartbeat(deviceId)` directly — the heartbeat topic is separate from the readings topic and must be handled independently in `MqttAdapter`
+
+> **Implementation note:** `DeviceService.recordHeartbeat()` must be the single entry-point for resetting the offline timer in both adapter modes. Neither adapter should duplicate the timeout logic.
+
 ---
 
 ## Epic 4: Temperature History & Reporting
@@ -690,7 +700,9 @@ So that I can understand my home's temperature patterns.
 
 **Given** the user selects the "30 days" range tab
 **When** the query fires
-**Then** the chart re-renders with daily aggregated data (24-hour buckets) and the query completes in < 2 s
+**Then** the chart re-renders with hourly aggregated data (720 data points) from `TempReadingHourly` and the query completes in < 2 s
+
+> **Implementation note:** No `TempReadingDaily` collection exists in the data model. The 30-day view uses the existing `TempReadingHourly` collection — 720 hourly buckets is acceptable chart density. Do not introduce a new collection for this view.
 
 **Given** no data exists for the selected range (new device)
 **When** the chart renders
@@ -710,17 +722,27 @@ So that I can understand my energy usage at a glance.
 
 **Acceptance Criteria:**
 
+> **Data model prerequisite:** `device.isHeating` is a boolean snapshot — it cannot be used to compute duration. Heating on/off transitions must be recorded as `Event` documents with `type: 'heating-start'` or `type: 'heating-stop'` so runtime can be derived. `ReadingService.ingest()` must compare the incoming `isHeating` value against the previous value and write the transition event when it changes. The `GET /api/v1/devices/:id/runtime?date=<ISO>` endpoint computes today's runtime by summing intervals between paired start/stop events.
+
+**Given** `ReadingService.ingest()` processes a reading where the computed `isHeating` state differs from the previous value
+**When** the transition is detected
+**Then** an `Event` document is written with `{ deviceId, type: 'heating-start' | 'heating-stop', timestamp }` — one document per transition
+
 **Given** the dashboard loads
 **When** the `HeatingRuntimeWidget` renders
-**Then** it shows today's total minutes/hours that `device.isHeating` was `true`, formatted as "Xh Ym"
+**Then** it calls `GET /api/v1/devices/:id/runtime?date=<today-ISO>`, which sums intervals between paired `heating-start` / `heating-stop` events for the day, and displays the total formatted as "Xh Ym"
 
 **Given** no heating events exist for today
 **When** the widget renders
 **Then** it shows "0m today" — not an error or empty state
 
-**Given** the device is currently heating
-**When** the widget updates via WebSocket
-**Then** the runtime counter increments in real time
+**Given** the device is currently heating (an unmatched `heating-start` exists with no subsequent `heating-stop`)
+**When** the runtime endpoint calculates today's total
+**Then** it adds the time elapsed since the last `heating-start` to the accumulated total — the in-progress interval is included
+
+**Given** the device transitions to heating
+**When** `ReadingService.ingest()` writes a `heating-start` event
+**Then** `device:runtime` is emitted via WebSocket so the dashboard widget updates in real time without polling
 
 ---
 
@@ -775,6 +797,16 @@ So that a command sent while the device is temporarily offline is not lost.
 **When** the device reconnects
 **Then** all pending commands are re-delivered in order — no command is silently dropped
 
+**Given** `SENSOR_ADAPTER=simulator` is active and a command is enqueued
+**When** the simulator polls `GET /internal/commands?deviceId=<id>&status=pending`
+**Then** the server returns the oldest pending command and marks it `'delivered'`; the simulator immediately auto-ACKs via `POST /internal/commands/:id/ack` — no WebSocket connection required from the simulator
+
+**Given** `SENSOR_ADAPTER=mqtt` is active and a command is enqueued
+**When** the command is ready to deliver
+**Then** the `MqttAdapter` publishes it to `devices/<id>/commands` and waits for an ACK on `devices/<id>/ack`
+
+> **Data model prerequisite:** Create `server/src/db/models/command.model.ts` with schema `{ deviceId: ObjectId, type: string, value: unknown, status: 'pending' | 'delivered' | 'acked', createdAt: Date }`. Index on `{ deviceId, status, createdAt }` for efficient pending-command queries.
+
 ---
 
 ### Story 5.3: Command Acknowledgement & Shadow Update
@@ -785,9 +817,15 @@ So that I know my command was actually applied.
 
 **Acceptance Criteria:**
 
-**Given** the Arduino (or simulator) ACKs a command via `command:ack` WebSocket event
-**When** `CommandService.ack()` processes it
-**Then** `shadow.reported.temp` is updated in MongoDB and `device:shadow` is emitted via WebSocket
+**Given** `SENSOR_ADAPTER=mqtt` is active and the Arduino publishes to `devices/<id>/ack`
+**When** `MqttAdapter` receives the message and calls `CommandService.ack(commandId)`
+**Then** `command.status` is set to `'acked'`, `shadow.reported` is updated in MongoDB, and `device:shadow` is emitted via WebSocket
+
+**Given** `SENSOR_ADAPTER=simulator` is active and the simulator posts to `POST /internal/commands/:id/ack`
+**When** `CommandService.ack(commandId)` runs
+**Then** the same shadow update and WebSocket emit occur — the ACK path is identical regardless of adapter
+
+> **Implementation note:** The simulator is an HTTP-only process with no WebSocket client. It must never be expected to emit `command:ack` as a Socket.io event. All simulator ACKs go through the REST endpoint above.
 
 **Given** the browser receives `device:shadow`
 **When** `desired.temp === reported.temp`
@@ -813,11 +851,22 @@ So that the system responds correctly to seasonal changes.
 
 **Given** the device operates in cooling mode
 **When** a new reading arrives and `reported.temp > desired.temp`
-**Then** `device.isHeating` is set to `false` and the cooling indicator is visible in the UI
+**Then** the system is actively cooling — `device.isHeating` is set to `false` and `device.isCooling` is set to `true`; the cooling indicator is visible in the UI
 
 **Given** the mode is set to "auto"
 **When** the system evaluates temperature
 **Then** it heats when `reported.temp < desired.temp - 0.5` and cools when `reported.temp > desired.temp + 0.5`
+
+> **Data model clarification:** `isHeating: boolean` alone is ambiguous in cooling mode. Add `isCooling: boolean` alongside `isHeating` in the Device document. The full state machine evaluated inside `ReadingService.ingest()` is:
+> - `mode = 'heat'` and `reported < desired` → `isHeating = true`, `isCooling = false`
+> - `mode = 'heat'` and `reported >= desired` → `isHeating = false`, `isCooling = false`
+> - `mode = 'cool'` and `reported > desired` → `isHeating = false`, `isCooling = true`
+> - `mode = 'cool'` and `reported <= desired` → `isHeating = false`, `isCooling = false`
+> - `mode = 'auto'` and `reported < desired - 0.5` → `isHeating = true`, `isCooling = false`
+> - `mode = 'auto'` and `reported > desired + 0.5` → `isHeating = false`, `isCooling = true`
+> - `mode = 'auto'` and within ±0.5 → both `false`
+>
+> `isHeating` and `isCooling` are mutually exclusive. The UI heating/cooling indicator reads both fields.
 
 ---
 
@@ -893,6 +942,8 @@ So that creating a schedule is faster and more intuitive than filling in a form.
 **Given** two slots overlap on the same day
 **When** the grid renders
 **Then** the overlapping slot is highlighted in red with an "Overlapping slots" tooltip
+
+> **Technical decision — drag library:** Use `@dnd-kit/core` with the `useDraggable` / `useDroppable` hooks for slot creation (drag to create) and `useSortable` for resize handles. `@dnd-kit` supports pointer events and touch events natively, covering mobile without additional configuration. Confirm before implementation that touch-drag to create slots is in scope for MVP; if not, defer mobile drag to a follow-up and use click-to-place on mobile for MVP.
 
 ---
 
@@ -997,23 +1048,61 @@ So that I can temporarily raise the temperature without permanently changing the
 
 **Acceptance Criteria:**
 
+> **Data model prerequisite:** Add `holdUntil?: Date` to the Device Shadow `desired` schema in `server/src/db/models/device.model.ts`. The field is optional (absent when no hold is active). It must be included in the Device Shadow returned by `GET /api/v1/devices/:id` so the UI can display the hold expiry time.
+
 **Given** the Admin selects a hold duration (1h / 3h / until next slot) from the TargetSlider options
 **When** the selection is confirmed
 **Then** `PATCH /api/v1/devices/:id/settings` fires with `{ desired: { temp: <current_slider_value>, holdUntil: <ISO timestamp> } }`
+**And** `shadow.desired.holdUntil` is persisted in MongoDB
 
-**Given** the hold period expires
-**When** the schedule engine evaluates the next reading
-**Then** the scheduled setpoint for the current time slot is restored — the hold is automatically cleared
+**Given** the hold period expires (current time > `shadow.desired.holdUntil`)
+**When** `ReadingService.ingest()` runs for the next reading
+**Then** the schedule engine checks whether `holdUntil` has passed; if so, it clears `holdUntil` (set to `null`), looks up the active schedule slot for the current time, and enqueues a `set-temp` command for the slot's `targetTemp`
+**And** `device:shadow` is emitted via WebSocket reflecting the cleared hold
+
+**Given** no active schedule slot exists when the hold expires
+**When** the schedule engine checks for a matching slot
+**Then** no command is enqueued — the last manually set temperature remains until the next scheduled slot begins
 
 **Given** the Admin sets Away mode while a hold is active
 **When** Away mode activates
 **Then** the hold is suspended and the away setpoint applies — the hold resumes when Away mode ends
+
+> **Schedule evaluation service:** The logic described above (check `holdUntil`, find active slot, enqueue command) lives in a `ScheduleService.evaluate(deviceId, timestamp)` method called from `ReadingService.ingest()`. This service is the single place that applies schedule, hold, and away priority rules. Priority order: Away mode > active hold > schedule slot > no-op.
 
 ---
 
 ## Epic 8: Notifications & Alerts
 
 Admin receives timely in-app and push notifications for the events that matter — target reached, anomaly detected, device offline.
+
+### Story 8.0: Service Worker Setup
+
+As a developer,
+I want a registered Service Worker that handles push events and notification clicks,
+So that Stories 8.3 and 8.4 have the infrastructure required to deliver and route push notifications.
+
+**Acceptance Criteria:**
+
+**Given** the Vite PWA plugin (`vite-plugin-pwa`) is configured in `vite.config.ts`
+**When** the client app builds
+**Then** `sw.js` is generated and registered via the plugin's `useRegisterSW` hook — no manual `navigator.serviceWorker.register()` call is needed
+
+**Given** the Service Worker receives a `push` event
+**When** the event fires
+**Then** `self.registration.showNotification(title, { body, data: { url } })` is called using the payload from the push message
+
+**Given** the user taps a displayed notification
+**When** the `notificationclick` event fires in the Service Worker
+**Then** `event.notification.close()` is called and `clients.openWindow(event.notification.data.url)` navigates to the device-specific URL (e.g., `/devices/<deviceId>`)
+
+**Given** the app is opened in Chrome DevTools
+**When** Application > Service Workers is inspected
+**Then** the service worker shows as "Activated and running" — no errors in registration or activation
+
+> **Implementation note:** This story must be completed before Story 8.3 (push subscription) and Story 8.4 (push delivery) are picked up. The push payload shape expected by the Service Worker (`{ title, body, data: { url } }`) must match what `NotificationService.send()` in Story 8.4 generates.
+
+---
 
 ### Story 8.1: In-App Device Offline Alert
 
@@ -1094,6 +1183,10 @@ So that I'm informed without needing to check the app.
 **Given** an anomaly event is created (Story 8.2)
 **When** `NotificationService.send()` runs
 **Then** a Web Push notification is sent: "Temperature alert: [temp] °C — [device name]"
+
+**Given** `NotificationService.send()` constructs a push payload
+**When** it calls the Web Push library
+**Then** the payload includes `{ title, body, data: { url: '/devices/<deviceId>' } }` — the `data.url` field is required for the Service Worker `notificationclick` handler (Story 8.0) to route correctly
 
 **Given** the Admin taps the push notification
 **When** the app opens
