@@ -1,38 +1,10 @@
 {
-  "name": "task-api",
+  "name": "thermostat",
   "version": "1.0.0",
-  "main": "dist/index.js",
+  "private": true,
+  "workspaces": ["client", "server", "simulator"],
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "nodemon --exec ts-node index.ts",
-    "build": "tsc",
-    "format": "prettier --write .",
-    "lint": "eslint . ",
-    "lint:fix": "eslint . --fix "
-  },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "description": "",
-  "dependencies": {
-    "bcryptjs": "^3.0.3",
-    "dotenv": "^17.2.4",
-    "express": "^5.2.1",
-    "express-async-handler": "^1.2.0",
-    "jsonwebtoken": "^9.0.3",
-    "mongodb": "^6.21.0",
-    "mongoose": "^8.22.1"
-  },
-  "devDependencies": {
-    "@eslint/js": "^9.39.3",
-    "@types/bcryptjs": "^2.4.6",
-    "@types/express": "^5.0.6",
-    "@types/jsonwebtoken": "^9.0.10",
-    "@types/node": "^25.2.2",
-    "eslint": "^9.39.3",
-    "nodemon": "^3.1.11",
-    "prettier": "^3.8.1",
-    "ts-node": "^10.9.2",
-    "typescript": "^5.9.3"
+    "dev:server": "npm run dev --workspace=server",
+    "dev:simulator": "npm run dev --workspace=simulator"
   }
 }
