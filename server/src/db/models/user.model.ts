@@ -1,17 +1,17 @@
 import mongoose, { Schema } from 'mongoose';
 
 export interface IUser {
-  username: string;
+  username?: string;
   email: string;
   password: string;
-  role: 'user' | 'admin';
+  role: 'admin' | 'guest';
+  emailVerified: boolean;
 }
 
 const userSchema = new Schema<IUser>(
   {
     username: {
-      type: String,
-      required: [true, 'Username is required']
+      type: String
     },
     email: {
       type: String,
@@ -24,8 +24,12 @@ const userSchema = new Schema<IUser>(
     },
     role: {
       type: String,
-      enum: ['user', 'admin'],
-      default: 'user'
+      enum: ['admin', 'guest'],
+      default: 'admin'
+    },
+    emailVerified: {
+      type: Boolean,
+      default: false
     }
   },
   { timestamps: true }

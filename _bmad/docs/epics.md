@@ -186,7 +186,7 @@ The backend connects to a real Arduino via MQTT with zero changes to business lo
 
 Users can register, log in, refresh sessions, invite guests, and log out. All subsequent epics require a valid session.
 
-### Story 1.1: Monorepo & Server Foundation
+### ✅ Story 1.1: Monorepo & Server Foundation
 
 As a developer,
 I want the monorepo scaffolded with server, client, and simulator packages, a working Express server, MongoDB connection, Redis connection, and Zod env validation,
@@ -209,7 +209,7 @@ So that all subsequent stories have a solid, validated foundation to build on.
 
 ---
 
-### Story 1.2: User Registration
+### ✅ Story 1.2: User Registration
 
 As an Admin,
 I want to register with my email and password,
@@ -236,7 +236,7 @@ So that I have a personal account with full control over my thermostat.
 
 ---
 
-### Story 1.3: User Login with JWT + Refresh Token
+### ✅ Story 1.3: User Login with JWT + Refresh Token
 
 As a registered user,
 I want to log in with my email and password,

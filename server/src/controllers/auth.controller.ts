@@ -1,53 +1,64 @@
+import { z } from 'zod';
 import type { Request, Response } from 'express';
-import User from '../db/models/user.model';
-import bcrypt from 'bcryptjs';
+import { registerUser, EmailAlreadyExistsError, loginUser, InvalidCredentialsError } from '../services/auth.service';
 import jwt from 'jsonwebtoken';
+import { env } from '../config/env';
+
+const registerSchema = z.object({
+  email: z.string().email(),
+  password: z.string().min(8)
+});
 
 export const register = async (req: Request, res: Response) => {
+  const parsed = registerSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: { code: 'VALIDATION_ERROR', details: parsed.error.issues } });
+    return;
+  }
+
   try {
-    const { username, email, password } = req.body;
-    if (!username || !email || !password) {
-      res.status(400).json({ error: 'Username, email, and password are required' });
-      return;
-    }
-
-    const existingUser = await User.findOne({ email });
-    if (existingUser) {
-      res.status(400).json({ error: 'User already exists' });
-      return;
-    }
-
-    const hashedPassword = await bcrypt.hash(password, 12);
-    const user = await User.create({ username, email, password: hashedPassword });
-
-    res.status(201).json({ data: { _id: user.id, email: user.email } });
+    await registerUser(parsed.data.email, parsed.data.password);
+    res.status(201).json({ data: { message: 'Registration successful' } });
   } catch (e) {
-    res.status(500).json({ error: (e as Error).message });
+    if (e instanceof EmailAlreadyExistsError) {
+      res.status(409).json({ error: { code: 'EMAIL_ALREADY_EXISTS', message: 'An account with this email already exists' } });
+      return;
+    }
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: (e as Error).message } });
   }
 };
 
+const loginSchema = z.object({
+  email: z.string().email(),
+  password: z.string().min(1)
+});
+
 export const login = async (req: Request, res: Response) => {
+  const parsed = loginSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: { code: 'VALIDATION_ERROR', details: parsed.error.issues } });
+    return;
+  }
+
   try {
-    const { email, password } = req.body;
-    if (!email || !password) {
-      res.status(400).json({ error: 'Email and password are required' });
-      return;
-    }
+    const { userId, role } = await loginUser(parsed.data.email, parsed.data.password);
 
-    const user = await User.findOne({ email });
-    if (!user || !(await bcrypt.compare(password, user.password))) {
-      res.status(401).json({ error: 'Invalid credentials' });
-      return;
-    }
+    const accessToken = jwt.sign({ userId, role }, env.JWT_ACCESS_SECRET, { expiresIn: '15m' });
+    const refreshToken = jwt.sign({ userId }, env.JWT_REFRESH_SECRET, { expiresIn: '7d' });
 
-    const accessToken = jwt.sign(
-      { user: { username: user.username, email: user.email, id: user.id } },
-      process.env.JWT_ACCESS_SECRET as string,
-      { expiresIn: '15m' }
-    );
+    res.cookie('refreshToken', refreshToken, {
+      httpOnly: true,
+      secure: true,
+      sameSite: 'strict',
+      maxAge: 7 * 24 * 60 * 60 * 1000
+    });
 
     res.status(200).json({ data: { accessToken } });
   } catch (e) {
-    res.status(500).json({ error: (e as Error).message });
+    if (e instanceof InvalidCredentialsError) {
+      res.status(401).json({ error: { code: 'INVALID_CREDENTIALS' } });
+      return;
+    }
+    res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: (e as Error).message } });
   }
 };

@@ -36,7 +36,7 @@ export const verifyJwt = asyncHandler(
   }
 );
 
-export const requireRole = (role: 'admin' | 'user') =>
+export const requireRole = (role: 'admin' | 'guest') =>
   asyncHandler(async (req: Request, res: Response, next: NextFunction) => {
     const user = await User.findById(req.user?.id);
 
